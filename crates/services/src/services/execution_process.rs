@@ -341,7 +341,7 @@ pub fn spawn_stream_raw_logs_to_storage(
                     LogMsg::Finished => {
                         break;
                     }
-                    LogMsg::JsonPatch(_) | LogMsg::Ready => continue,
+                    LogMsg::JsonPatch(_) | LogMsg::BranchName(_) | LogMsg::Ready => continue,
                 }
             }
         }

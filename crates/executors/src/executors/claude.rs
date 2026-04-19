@@ -771,6 +771,7 @@ impl ClaudeLogProcessor {
             let mut buffer = String::new();
             let worktree_path = current_dir_clone.to_string_lossy().to_string();
             let mut session_id_extracted = false;
+            let mut branch_name_extracted = false;
             let mut processor = Self::new_with_strategy(strategy);
             // Track pending assistant UUID - only committed when we see a Result message
             let mut pending_assistant_uuid: Option<String> = None;
@@ -781,6 +782,7 @@ impl ClaudeLogProcessor {
                     LogMsg::JsonPatch(_)
                     | LogMsg::SessionId(_)
                     | LogMsg::MessageId(_)
+                    | LogMsg::BranchName(_)
                     | LogMsg::Stderr(_)
                     | LogMsg::Ready => continue,
                     LogMsg::Finished => break,
@@ -815,6 +817,14 @@ impl ClaudeLogProcessor {
                             {
                                 msg_store.push_session_id(session_id);
                                 session_id_extracted = true;
+                            }
+
+                            // Extract branch name from first assistant message
+                            if !branch_name_extracted
+                                && let Some(name) = Self::extract_branch_name(&claude_json)
+                            {
+                                msg_store.push_branch_name(name);
+                                branch_name_extracted = true;
                             }
 
                             // Track message UUIDs for --resume-session-at:
@@ -906,6 +916,65 @@ impl ClaudeLogProcessor {
             ClaudeJson::RateLimitEvent { session_id, .. } => session_id.clone(),
             ClaudeJson::Unknown { .. } => None,
         }
+    }
+
+    /// Extract a branch name suggestion from assistant message content.
+    /// Looks for the pattern `vk-branch: <name>` in the text output.
+    fn extract_branch_name(claude_json: &ClaudeJson) -> Option<String> {
+        let content = match claude_json {
+            ClaudeJson::Assistant { message, .. } => &message.content,
+            _ => return None,
+        };
+
+        let text = match content {
+            ClaudeMessageContent::Text(s) => s.as_str(),
+            ClaudeMessageContent::Array(items) => {
+                // Find the first text content item
+                for item in items {
+                    if let ClaudeContentItem::Text { text } = item
+                        && let Some(name) = Self::parse_branch_name_from_text(text)
+                    {
+                        return Some(name);
+                    }
+                }
+                return None;
+            }
+        };
+
+        Self::parse_branch_name_from_text(text)
+    }
+
+    fn parse_branch_name_from_text(text: &str) -> Option<String> {
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed
+                .strip_prefix("vk-branch:")
+                .or_else(|| trimmed.strip_prefix("vk-branch :"))
+            {
+                let name = name.trim();
+                if !name.is_empty() {
+                    // Sanitize: lowercase, replace invalid chars with hyphens, max 50 chars
+                    let sanitized = name
+                        .to_lowercase()
+                        .chars()
+                        .map(|c| {
+                            if c.is_ascii_alphanumeric() || c == '-' || c == '/' {
+                                c
+                            } else {
+                                '-'
+                            }
+                        })
+                        .collect::<String>();
+                    let sanitized = sanitized.trim_matches('-');
+                    let sanitized: String = sanitized.chars().take(50).collect();
+                    let sanitized = sanitized.trim_end_matches('-').to_string();
+                    if !sanitized.is_empty() {
+                        return Some(sanitized);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Generate warning entry if API key source is ANTHROPIC_API_KEY

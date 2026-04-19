@@ -84,6 +84,92 @@ pub enum ContainerError {
     Other(#[from] AnyhowError), // Catches any unclassified errors
 }
 
+/// Rename a workspace's git branch across all repos and update the DB.
+/// Intended for automated renames (e.g., agent-suggested branch names) where
+/// no open PRs or in-progress rebases exist yet.
+pub async fn rename_workspace_branch(
+    db: &DBService,
+    git: &GitService,
+    workspace: &Workspace,
+    workspace_dir: &Path,
+    new_branch_name: &str,
+) -> Result<(), ContainerError> {
+    if new_branch_name.is_empty() || !git.is_branch_name_valid(new_branch_name) {
+        return Err(ContainerError::Other(anyhow!(
+            "Invalid branch name: {}",
+            new_branch_name
+        )));
+    }
+
+    if new_branch_name == workspace.branch {
+        return Ok(());
+    }
+
+    let repos = WorkspaceRepo::find_repos_for_workspace(&db.pool, workspace.id).await?;
+
+    // Check no branch collision in any repo
+    for repo in &repos {
+        if git.check_branch_exists(&repo.path, new_branch_name)? {
+            return Err(ContainerError::Other(anyhow!(
+                "Branch '{}' already exists in repo '{}'",
+                new_branch_name,
+                repo.name
+            )));
+        }
+    }
+
+    let old_branch = workspace.branch.clone();
+    let mut renamed_repos: Vec<&Repo> = Vec::new();
+
+    for repo in &repos {
+        let worktree_path = workspace_dir.join(&repo.name);
+        match git.rename_local_branch(&worktree_path, &old_branch, new_branch_name) {
+            Ok(()) => {
+                renamed_repos.push(repo);
+            }
+            Err(e) => {
+                // Rollback already-renamed repos
+                for renamed_repo in &renamed_repos {
+                    let rollback_path = workspace_dir.join(&renamed_repo.name);
+                    if let Err(rollback_err) =
+                        git.rename_local_branch(&rollback_path, new_branch_name, &old_branch)
+                    {
+                        tracing::error!(
+                            "Failed to rollback branch rename in '{}': {}",
+                            renamed_repo.name,
+                            rollback_err
+                        );
+                    }
+                }
+                return Err(ContainerError::Other(anyhow!(
+                    "Failed to rename branch in repo '{}': {}",
+                    repo.name,
+                    e
+                )));
+            }
+        }
+    }
+
+    Workspace::update_branch_name(&db.pool, workspace.id, new_branch_name).await?;
+    let updated_children_count = WorkspaceRepo::update_target_branch_for_children_of_workspace(
+        &db.pool,
+        workspace.id,
+        &old_branch,
+        new_branch_name,
+    )
+    .await?;
+
+    if updated_children_count > 0 {
+        tracing::info!(
+            "Updated {} child workspaces to target new branch '{}'",
+            updated_children_count,
+            new_branch_name
+        );
+    }
+
+    Ok(())
+}
+
 #[async_trait]
 pub trait ContainerService {
     fn msg_stores(&self) -> &Arc<RwLock<HashMap<Uuid, Arc<MsgStore>>>>;
@@ -1083,9 +1169,17 @@ pub trait ContainerService {
             .filter(|dir| !dir.is_empty())
             .cloned();
 
+        let prompt_with_branch_instruction = format!(
+            "{}\n\n\
+            Before starting work, output exactly one line in this format: `vk-branch: <branch-name>` \
+            where <branch-name> is a short, descriptive kebab-case name for this task's git branch \
+            (max 50 chars, no spaces). Do not wrap it in a code block.",
+            prompt
+        );
+
         let coding_action = ExecutorAction::new(
             ExecutorActionType::CodingAgentInitialRequest(CodingAgentInitialRequest {
-                prompt,
+                prompt: prompt_with_branch_instruction,
                 executor_config: executor_config.clone(),
                 working_dir,
             }),
@@ -1344,6 +1438,66 @@ pub trait ContainerService {
                     );
                 }
             }
+        }
+
+        // Spawn branch name listener for initial coding agent requests
+        if matches!(
+            executor_action.typ(),
+            ExecutorActionType::CodingAgentInitialRequest(_)
+        ) && let Some(msg_store) = self.get_msg_store_by_id(&execution_process.id).await
+        {
+            let workspace_clone = workspace.clone();
+            let workspace_dir = self.workspace_to_current_dir(workspace);
+            let db = self.db().clone();
+            let git = self.git().clone();
+
+            tokio::spawn(async move {
+                let mut rx = msg_store.get_receiver();
+                let timeout = tokio::time::sleep(std::time::Duration::from_secs(120));
+                tokio::pin!(timeout);
+
+                loop {
+                    tokio::select! {
+                        msg = rx.recv() => {
+                            match msg {
+                                Ok(LogMsg::BranchName(name)) => {
+                                    tracing::info!(
+                                        "Agent suggested branch name '{}' for workspace {}",
+                                        name,
+                                        workspace_clone.id
+                                    );
+                                    if let Err(e) = rename_workspace_branch(
+                                        &db,
+                                        &git,
+                                        &workspace_clone,
+                                        &workspace_dir,
+                                        &name,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to auto-rename branch for workspace {}: {}",
+                                            workspace_clone.id,
+                                            e
+                                        );
+                                    }
+                                    break;
+                                }
+                                Ok(LogMsg::Finished) => break,
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                                _ => continue,
+                            }
+                        }
+                        _ = &mut timeout => {
+                            tracing::debug!(
+                                "Branch name listener timed out for workspace {}",
+                                workspace_clone.id
+                            );
+                            break;
+                        }
+                    }
+                }
+            });
         }
 
         execution_process::spawn_stream_raw_logs_to_storage(
