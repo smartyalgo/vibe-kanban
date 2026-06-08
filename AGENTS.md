@@ -42,6 +42,10 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 ## Before Completing a Task
 - Run `pnpm run format` to format all Rust workspaces and web code.
 
+## Before Opening a PR
+- Run `pnpm run format` (`prettier --write` + `cargo fmt`) on every package you touched. CI's `frontend-checks` runs `format:check` across the *entire* package with `concurrently --kill-others-on-fail`, so a single Prettier violation anywhere — even one that pre-existed on `main` — fails the whole job and blocks the PR. If `format:check` flags a file you did not touch, fix it in a separate, clearly-labeled commit.
+- Reproduce the GitHub Actions job that covers your change locally and confirm every task exits 0 before pushing. For frontend changes, run the `frontend-checks` step from `.github/workflows/test.yml` (the `npx concurrently ...` block; drop `--kill-others-on-fail` so you see every result). For backend changes, run `pnpm run backend:check`, `cargo clippy`, and `cargo test --workspace`.
+
 ## Coding Style & Naming Conventions
 - Rust: `rustfmt` enforced (`rustfmt.toml`); group imports by crate; snake_case modules, PascalCase types.
 - TypeScript/React: ESLint + Prettier (2 spaces, single quotes, 80 cols). PascalCase components, camelCase vars/functions, kebab-case file names where practical.
