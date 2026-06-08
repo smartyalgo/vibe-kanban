@@ -21,6 +21,27 @@ npx vibe-kanban review --help
 npx vibe-kanban mcp --help
 ```
 
+### Register a project from the command line
+
+With vibe-kanban running, you can add the current directory as a project without opening the UI:
+
+```bash
+# Register the current directory as a project
+cd /path/to/your/repo
+npx vibe-kanban init
+
+# Register a specific directory
+npx vibe-kanban init --path /path/to/your/repo
+
+# Register with a custom display name
+npx vibe-kanban init --name "My Awesome App"
+
+# Both options together
+npx vibe-kanban init --path /path/to/your/repo --name "My Awesome App"
+```
+
+The `init` command requires vibe-kanban to be running (`npx vibe-kanban`) and the target directory to be a git repository.
+
 ## What is Vibe Kanban?
 
 Vibe Kanban is a modern project management tool designed specifically for developers. It helps you organize your coding projects with kanban-style task management while providing powerful integrations with git repositories and AI coding agents.
