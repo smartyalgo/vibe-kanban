@@ -55,4 +55,5 @@ Do not manually edit shared/remote-types.ts, instead edit crates/remote/src/bin/
 - Use `.env` for local overrides; never commit secrets. Key envs: `FRONTEND_PORT`, `BACKEND_PORT`, `HOST` 
 - Dev ports and assets are managed by `scripts/setup-dev-environment.js`.
 
-
+## Documentation
+When we modify an existing control flow, check if there are documentations inside the docs directory. IF not, create documentation. Else, update the documentation to match the updated code
