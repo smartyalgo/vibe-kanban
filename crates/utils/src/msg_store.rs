@@ -79,6 +79,10 @@ impl MsgStore {
         self.push(LogMsg::MessageId(id));
     }
 
+    pub fn push_branch_name(&self, name: String) {
+        self.push(LogMsg::BranchName(name));
+    }
+
     pub fn push_finished(&self) {
         self.push(LogMsg::Finished);
     }
