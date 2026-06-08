@@ -1,5 +1,6 @@
 import { execSync, spawn } from "child_process";
 import path from "path";
+import os from "os";
 import fs from "fs";
 import { cac } from "cac";
 import {
@@ -294,6 +295,95 @@ function normalizeArgv(argv: string[]): string[] {
   return [...argv.slice(0, 2), ...normalizedArgs];
 }
 
+type InitOptions = {
+  path?: string;
+  name?: string;
+};
+
+async function resolveBackendUrl(): Promise<string> {
+  if (process.env.VIBE_BACKEND_URL) {
+    return process.env.VIBE_BACKEND_URL;
+  }
+
+  const envPort =
+    process.env.BACKEND_PORT || process.env.MCP_PORT || process.env.PORT;
+  if (envPort) {
+    const host = process.env.HOST || "127.0.0.1";
+    return `http://${host}:${envPort}`;
+  }
+
+  const portFile = path.join(os.tmpdir(), "vibe-kanban", "vibe-kanban.port");
+  try {
+    const content = fs.readFileSync(portFile, "utf8");
+    let port: number;
+    try {
+      const info = JSON.parse(content) as { main_port?: number };
+      port = info.main_port ?? parseInt(content.trim(), 10);
+    } catch {
+      port = parseInt(content.trim(), 10);
+    }
+    if (isNaN(port)) throw new Error("Invalid port in port file");
+    return `http://127.0.0.1:${port}`;
+  } catch {
+    console.error("Error: vibe-kanban does not appear to be running.");
+    console.error("Start it first with: npx vibe-kanban");
+    process.exit(1);
+  }
+}
+
+async function runInit(options: InitOptions): Promise<void> {
+  const targetPath = options.path
+    ? path.resolve(options.path)
+    : process.cwd();
+
+  // Verify it's a git repo
+  try {
+    execSync("git rev-parse --git-dir", { cwd: targetPath, stdio: "pipe" });
+  } catch {
+    console.error(`Error: '${targetPath}' is not a git repository.`);
+    process.exit(1);
+  }
+
+  const baseUrl = await resolveBackendUrl();
+  const apiUrl = `${baseUrl}/api/repos`;
+
+  let response: Response;
+  try {
+    response = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: targetPath,
+        display_name: options.name ?? undefined,
+      }),
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`Error connecting to vibe-kanban: ${msg}`);
+    console.error(`Make sure vibe-kanban is running (npx vibe-kanban).`);
+    process.exit(1);
+  }
+
+  const body = (await response.json()) as {
+    success: boolean;
+    data?: { id: string; display_name?: string; path: string };
+    error?: string;
+  };
+
+  if (!response.ok || !body.success) {
+    console.error(
+      `Error registering project: ${body.error ?? response.statusText}`,
+    );
+    process.exit(1);
+  }
+
+  const repo = body.data!;
+  const label = repo.display_name || path.basename(repo.path);
+  console.log(`Project registered: ${label}`);
+  console.log(`  Path: ${repo.path}`);
+  console.log(`  ID:   ${repo.id}`);
+}
+
 function runOrExit(task: Promise<void>): void {
   void task.catch((err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
@@ -329,6 +419,17 @@ async function main(): Promise<void> {
     .allowUnknownOptions()
     .action((args: string[]) => {
       runOrExit(runMcp(args));
+    });
+
+  cli
+    .command(
+      "init",
+      "Register the current directory (or --path) as a vibe-kanban project",
+    )
+    .option("--path <dir>", "Path to the git repository (default: cwd)")
+    .option("--name <name>", "Display name for the project")
+    .action((options: InitOptions) => {
+      runOrExit(runInit(options));
     });
 
   cli.help();
